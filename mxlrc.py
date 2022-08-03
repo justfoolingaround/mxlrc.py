@@ -1,18 +1,26 @@
+import base64
+import hmac
+from datetime import datetime
+from urllib.parse import urlencode
+
 import click
+import regex
+import requests
 
 try:
     import orjson
 except ImportError:
     import json as orjson
 
-import regex
-import requests
 
-DEFAULT_TOKEN = "2203269256ff7abcb649269df00e14c833dbf4ddfb5b36a1aae8b0"
+API_URL = "https://apic-desktop.musixmatch.com/ws/1.1/"
+
 
 ARTIST_TRACK_REGEX = regex.compile(
     r"^(?P<artist>(?:\\(?&separator)|.)+?)\s*(?P<separator>[,—-])+\s*(?P<track_name>(?:\\(?&separator)|.)+?)$"
 )
+
+HTTP_USER_AGENT = "Musixmatch/0.19.4"
 
 
 class UnexpectedResponse(RuntimeError):
@@ -49,6 +57,37 @@ class LyricsNotFoundError(TrackError):
 
 
 MUSIC_SYMBOL = "♪"
+
+
+def generate_token(session):
+
+    signature_protocol = "sha1"
+    datetime_now = datetime.now()
+    current_timestamp = format(datetime_now, "%Y-%m-%dT%H:%M:%SZ")
+
+    params = {
+        "format": "json",
+        "timestamp": current_timestamp,
+        "app_id": "web-desktop-app-v1.0",
+    }
+
+    url = API_URL + "token.get?" + urlencode(params)
+
+    signature = base64.urlsafe_b64encode(
+        hmac.digest(
+            b"IEJ5E8XFaHQvIQNfs7IC",
+            (url + format(datetime_now, "%Y%m%d")).encode(),
+            signature_protocol,
+        )
+    ).decode()
+
+    response = session.get(
+        url, params={"signature": signature, "signature_protocol": signature_protocol}
+    ).json()["message"]
+
+    UnexpectedResponse.raise_if_faulty(response)
+
+    return response["body"]["user_token"]
 
 
 def parse_duration(duration: float):
@@ -123,9 +162,9 @@ def iter_parsed_to_lrc(parsed_lyrics, track_meta):
 
 class MusixMatch:
 
-    lyrics_endpoint = "https://apic-desktop.musixmatch.com/ws/1.1/macro.subtitles.get"
+    lyrics_endpoint = API_URL + "macro.subtitles.get"
 
-    def __init__(self, token=DEFAULT_TOKEN, *, session: requests.Session = None):
+    def __init__(self, token, *, session: requests.Session = None):
 
         self.token = token
         self.session = session or requests.Session()
@@ -211,11 +250,17 @@ def parse_track(ctx: click.Context, argument: click.Argument, track):
 
 @click.command()
 @click.argument("track", callback=parse_track)
-@click.option("--token", default=DEFAULT_TOKEN, help="MusixMatch API token")
+@click.option("--token", required=False, type=click.STRING, help="MusixMatch API token")
 @click.option("-l", "--lrc", is_flag=True, help="Output LRC instead of plain text")
 def musixmatch_lyrics(track, token, lrc):
 
-    client = MusixMatch(token)
+    session = requests.Session()
+    session.headers.update({"User-Agent": HTTP_USER_AGENT})
+
+    if token is None:
+        token = generate_token(session)
+
+    client = MusixMatch(token, session=session)
 
     for line in client.iter_lines(*track, lrc_format=lrc):
         print(line)

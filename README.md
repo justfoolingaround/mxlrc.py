@@ -13,9 +13,4 @@ Options:
   --help        Show this message and exit.
 ```
 
-<h2>Token</h2>
-
-Get your own token by following the steps described [here](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). You do not have to send in a token.
-
-
 <h3 align="center">Forked from <a href="https://github.com/fashni/MxLRC">here</a> in an effort to optimise and make better the current state of the project.</h3>
