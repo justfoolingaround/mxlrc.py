@@ -1,7 +1,9 @@
 import base64
 import hmac
-from datetime import datetime
-from urllib.parse import urlencode, unquote
+import pathlib
+import time
+from datetime import datetime, timedelta
+from urllib.parse import unquote, urlencode
 
 import click
 import regex
@@ -19,11 +21,11 @@ API_URL = "https://apic-desktop.musixmatch.com/ws/1.1/"
 ARTIST_TRACK_REGEX = regex.compile(
     r"^(?P<artist>(?:\\(?&separator)|.)+?)\s*(?P<separator>[,—-])+\s*(?P<track_name>(?:\\(?&separator)|.)+?)$"
 )
-SPOTIFY_EMBED_TRACK = regex.compile(
-    r'<script id="resource".+?>\s+(.+?)\s+</script>'
-)
+SPOTIFY_EMBED_TRACK = regex.compile(r'<script id="resource".+?>\s+(.+?)\s+</script>')
 
 HTTP_USER_AGENT = "Musixmatch/0.19.4"
+
+TOKEN_PATH = pathlib.Path(__file__).parent / ".token"
 
 
 class UnexpectedResponse(RuntimeError):
@@ -61,10 +63,11 @@ class LyricsNotFoundError(TrackError):
 
 MUSIC_SYMBOL = "♪"
 
+
 def get_api_signature(api_endpoint, timestamp):
 
     signature_protocol = "sha1"
-    
+
     signature = base64.urlsafe_b64encode(
         hmac.digest(
             b"IEJ5E8XFaHQvIQNfs7IC",
@@ -75,6 +78,7 @@ def get_api_signature(api_endpoint, timestamp):
 
     return signature, signature_protocol
 
+
 def get_spotify_track_information(session, spotify_id):
 
     response = session.get(
@@ -82,14 +86,22 @@ def get_spotify_track_information(session, spotify_id):
     )
     response.raise_for_status()
 
-    api_response = orjson.loads(unquote(SPOTIFY_EMBED_TRACK.search(response.text).group(1)))
+    api_response = orjson.loads(
+        unquote(SPOTIFY_EMBED_TRACK.search(response.text).group(1))
+    )
 
     return api_response["name"], ", ".join(_["name"] for _ in api_response["artists"])
 
 
 def generate_token(session):
 
-    signature_protocol = "sha1"
+    if TOKEN_PATH.exists():
+        with TOKEN_PATH.open("rb") as token_file:
+            token = orjson.loads(token_file.read())
+
+        if time.time() < token.get("expires_at", 0):
+            return token["token"]
+
     datetime_now = datetime.now()
     current_timestamp = format(datetime_now, "%Y-%m-%dT%H:%M:%SZ")
 
@@ -108,6 +120,16 @@ def generate_token(session):
     ).json()["message"]
 
     UnexpectedResponse.raise_if_faulty(response)
+
+    with TOKEN_PATH.open("wb") as token_file:
+        token_file.write(
+            orjson.dumps(
+                {
+                    "token": response["body"]["user_token"],
+                    "expires_at": (datetime_now + timedelta(days=30)).timestamp(),
+                },
+            )
+        )
 
     return response["body"]["user_token"]
 
@@ -192,13 +214,15 @@ class MusixMatch:
         self.session = session or requests.Session()
 
     def get_api(self, endpoint, params):
-        params.update({
-            "usertoken": self.token,
-            "format": "json",
-            "subtitle_format": "mxm",
-            "namespace": "lyrics_richsynched",
-            "app_id": "web-desktop-app-v1.0"
-        })
+        params.update(
+            {
+                "usertoken": self.token,
+                "format": "json",
+                "subtitle_format": "mxm",
+                "namespace": "lyrics_richsynched",
+                "app_id": "web-desktop-app-v1.0",
+            }
+        )
         response = self.session.get(API_URL + endpoint, params=params).json()["message"]
         UnexpectedResponse.raise_if_faulty(response)
         return response["body"]
@@ -211,14 +235,13 @@ class MusixMatch:
             },
         )
 
-
     def get_track_from_meta(self, artist, title):
         return self.get_api(
             "macro.subtitles.get",
             {
                 "q_artist": artist,
                 "q_track": title,
-            }
+            },
         )
 
     def get_track_from_id(self, track_id):
@@ -226,7 +249,7 @@ class MusixMatch:
             "track.subtitles.get",
             {
                 "track_id": track_id,
-            }
+            },
         )
 
     def get_track_from_spotify_id(self, spotify_id):
@@ -234,11 +257,18 @@ class MusixMatch:
             "track.subtitles.get",
             {
                 "track_spotify_id": spotify_id,
-            }
+            },
         )
 
-    def iter_lines(self, *args, lrc_format=False, is_isrc=False, is_track_id=False, is_spotify=False, **kwargs):
-
+    def iter_lines(
+        self,
+        *args,
+        lrc_format=False,
+        is_isrc=False,
+        is_track_id=False,
+        is_spotify=False,
+        **kwargs,
+    ):
 
         if is_isrc:
             message = self.get_track_from_isrc(*args, **kwargs)
@@ -254,12 +284,16 @@ class MusixMatch:
         track_meta = {}
 
         if "macro_calls" not in message:
-            genexp = iter_synced_lyrics({"track.subtitles.get": {"message": {"body": message}}})
+            genexp = iter_synced_lyrics(
+                {"track.subtitles.get": {"message": {"body": message}}}
+            )
 
         else:
 
             message_body = message["macro_calls"]
-            UnexpectedResponse.raise_if_faulty(message_body["matcher.track.get"]["message"])
+            UnexpectedResponse.raise_if_faulty(
+                message_body["matcher.track.get"]["message"]
+            )
 
             track_body = message_body["matcher.track.get"]["message"]["body"]["track"]
             title, artist = track_body["track_name"], track_body["artist_name"]
@@ -268,7 +302,9 @@ class MusixMatch:
             UnexpectedResponse.raise_if_faulty(lyrics_body)
 
             if lyrics_body is None:
-                raise TrackNotFoundError(f"No lyrics found for {f'{title} by {artist}'!r}")
+                raise TrackNotFoundError(
+                    f"No lyrics found for {f'{title} by {artist}'!r}"
+                )
 
             if lyrics_body.get("body", {}).get("lyrics", {}).get("restricted", False):
                 raise TrackRestrictedError(
@@ -313,9 +349,21 @@ def parse_track(track):
 @click.argument("track")
 @click.option("--token", required=False, type=click.STRING, help="MusixMatch API token")
 @click.option("-l", "--lrc", is_flag=True, help="Output LRC instead of plain text")
-@click.option("-i", "--isrc", is_flag=True, help="Use ISRC instead of artist and track name")
-@click.option("-t", "--track-id", is_flag=True, help="Use track ID instead of artist and track name")
-@click.option("-s", "--spotify-id", is_flag=True, help="Use Spotify ID instead of artist and track name")
+@click.option(
+    "-i", "--isrc", is_flag=True, help="Use ISRC instead of artist and track name"
+)
+@click.option(
+    "-t",
+    "--track-id",
+    is_flag=True,
+    help="Use track ID instead of artist and track name",
+)
+@click.option(
+    "-s",
+    "--spotify-id",
+    is_flag=True,
+    help="Use Spotify ID instead of artist and track name",
+)
 def musixmatch_lyrics(track, token, lrc, isrc, track_id, spotify_id):
 
     session = requests.Session()
@@ -325,21 +373,23 @@ def musixmatch_lyrics(track, token, lrc, isrc, track_id, spotify_id):
 
     if not any((isrc, track_id, spotify_id)):
         artist, title = parse_track(track)
-        
+
         kwargs.update(
             artist=artist,
             title=title,
         )
-        
+
     if (isrc & track_id) | (isrc & spotify_id) | (track_id & spotify_id):
-        raise click.ClickException("Cannot use any two of --isrc, --track-id, --spotify-id")
+        raise click.ClickException(
+            "Cannot use any two of --isrc, --track-id, --spotify-id"
+        )
 
     if isrc:
         kwargs.update(isrc=track)
-    
+
     if track_id:
         kwargs.update(track_id=track)
-    
+
     if spotify_id:
         kwargs.update(spotify_id=track)
 
@@ -348,7 +398,13 @@ def musixmatch_lyrics(track, token, lrc, isrc, track_id, spotify_id):
 
     client = MusixMatch(token, session=session)
 
-    for line in client.iter_lines(**kwargs, lrc_format=lrc, is_isrc=isrc, is_track_id=track_id, is_spotify=spotify_id):
+    for line in client.iter_lines(
+        **kwargs,
+        lrc_format=lrc,
+        is_isrc=isrc,
+        is_track_id=track_id,
+        is_spotify=spotify_id,
+    ):
         print(line)
 
 
