@@ -1,7 +1,7 @@
 import base64
 import hmac
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, unquote
 
 import click
 import regex
@@ -18,6 +18,9 @@ API_URL = "https://apic-desktop.musixmatch.com/ws/1.1/"
 
 ARTIST_TRACK_REGEX = regex.compile(
     r"^(?P<artist>(?:\\(?&separator)|.)+?)\s*(?P<separator>[,—-])+\s*(?P<track_name>(?:\\(?&separator)|.)+?)$"
+)
+SPOTIFY_EMBED_TRACK = regex.compile(
+    r'<script id="resource".+?>\s+(.+?)\s+</script>'
 )
 
 HTTP_USER_AGENT = "Musixmatch/0.19.4"
@@ -58,6 +61,31 @@ class LyricsNotFoundError(TrackError):
 
 MUSIC_SYMBOL = "♪"
 
+def get_api_signature(api_endpoint, timestamp):
+
+    signature_protocol = "sha1"
+    
+    signature = base64.urlsafe_b64encode(
+        hmac.digest(
+            b"IEJ5E8XFaHQvIQNfs7IC",
+            (api_endpoint + format(timestamp, "%Y%m%d")).encode(),
+            signature_protocol,
+        )
+    ).decode()
+
+    return signature, signature_protocol
+
+def get_spotify_track_information(session, spotify_id):
+
+    response = session.get(
+        f"https://open.spotify.com/embed-legacy/track/{spotify_id}",
+    )
+    response.raise_for_status()
+
+    api_response = orjson.loads(unquote(SPOTIFY_EMBED_TRACK.search(response.text).group(1)))
+
+    return api_response["name"], ", ".join(_["name"] for _ in api_response["artists"])
+
 
 def generate_token(session):
 
@@ -73,13 +101,7 @@ def generate_token(session):
 
     url = API_URL + "token.get?" + urlencode(params)
 
-    signature = base64.urlsafe_b64encode(
-        hmac.digest(
-            b"IEJ5E8XFaHQvIQNfs7IC",
-            (url + format(datetime_now, "%Y%m%d")).encode(),
-            signature_protocol,
-        )
-    ).decode()
+    signature, signature_protocol = get_api_signature(url, datetime_now)
 
     response = session.get(
         url, params={"signature": signature, "signature_protocol": signature_protocol}
@@ -169,66 +191,105 @@ class MusixMatch:
         self.token = token
         self.session = session or requests.Session()
 
-    def get_song(self, artist, track_name):
+    def get_api(self, endpoint, params):
+        params.update({
+            "usertoken": self.token,
+            "format": "json",
+            "subtitle_format": "mxm",
+            "namespace": "lyrics_richsynched",
+            "app_id": "web-desktop-app-v1.0"
+        })
+        response = self.session.get(API_URL + endpoint, params=params).json()["message"]
+        UnexpectedResponse.raise_if_faulty(response)
+        return response["body"]
 
-        response = self.session.get(
-            self.lyrics_endpoint,
-            params={
-                "usertoken": self.token,
-                "q_artist": artist,
-                "q_track": track_name,
-                "format": "json",
-                "namespace": "lyrics_richsynched",
-                "subtitle_format": "mxm",
-                "app_id": "web-desktop-app-v1.0",
+    def get_track_from_isrc(self, isrc):
+        return self.get_api(
+            "track.subtitles.get",
+            {
+                "track_isrc": isrc,
             },
         )
-        response.raise_for_status()
 
-        message = response.json()["message"]
-        UnexpectedResponse.raise_if_faulty(message)
 
-        return message
+    def get_track_from_meta(self, artist, title):
+        return self.get_api(
+            "macro.subtitles.get",
+            {
+                "q_artist": artist,
+                "q_track": title,
+            }
+        )
 
-    def get_track_lyrics_body(self, artist, title):
+    def get_track_from_id(self, track_id):
+        return self.get_api(
+            "track.subtitles.get",
+            {
+                "track_id": track_id,
+            }
+        )
 
-        message = self.get_song(artist, title)
+    def get_track_from_spotify_id(self, spotify_id):
+        return self.get_api(
+            "track.subtitles.get",
+            {
+                "track_spotify_id": spotify_id,
+            }
+        )
 
-        message_body = message["body"]["macro_calls"]
-        UnexpectedResponse.raise_if_faulty(message_body["matcher.track.get"]["message"])
+    def iter_lines(self, *args, lrc_format=False, is_isrc=False, is_track_id=False, is_spotify=False, **kwargs):
 
-        lyrics_body = message_body["track.lyrics.get"]["message"]
-        UnexpectedResponse.raise_if_faulty(lyrics_body)
 
-        if lyrics_body is None:
-            raise TrackNotFoundError(f"No lyrics found for {f'{title} by {artist}'!r}")
+        if is_isrc:
+            message = self.get_track_from_isrc(*args, **kwargs)
+        else:
+            if is_track_id:
+                message = self.get_track_from_id(*args, **kwargs)
+            else:
+                if is_spotify:
+                    message = self.get_track_from_spotify_id(*args, **kwargs)
+                else:
+                    message = self.get_track_from_meta(*args, **kwargs)
 
-        if lyrics_body.get("body", {}).get("lyrics", {}).get("restricted", False):
-            raise TrackRestrictedError(
-                f"Lyrics for {f'{title} by {artist}'!r} are restricted."
-            )
+        track_meta = {}
 
-        return message_body
-
-    def iter_lines(self, artist, title, lrc_format=False):
-
-        message_body = self.get_track_lyrics_body(artist, title)
-
-        track_meta = message_body["matcher.track.get"]["message"]["body"]["track"]
-
-        if track_meta.get("has_subtitles", 0):
-            genexp = iter_synced_lyrics(message_body)
+        if "macro_calls" not in message:
+            genexp = iter_synced_lyrics({"track.subtitles.get": {"message": {"body": message}}})
 
         else:
-            if track_meta.get("has_lyrics", 0):
-                genexp = iter_unsynced_lyrics(message_body)
+
+            message_body = message["macro_calls"]
+            UnexpectedResponse.raise_if_faulty(message_body["matcher.track.get"]["message"])
+
+            track_body = message_body["matcher.track.get"]["message"]["body"]["track"]
+            title, artist = track_body["track_name"], track_body["artist_name"]
+
+            lyrics_body = message_body["track.lyrics.get"]["message"]
+            UnexpectedResponse.raise_if_faulty(lyrics_body)
+
+            if lyrics_body is None:
+                raise TrackNotFoundError(f"No lyrics found for {f'{title} by {artist}'!r}")
+
+            if lyrics_body.get("body", {}).get("lyrics", {}).get("restricted", False):
+                raise TrackRestrictedError(
+                    f"Lyrics for {f'{title} by {artist}'!r} are restricted."
+                )
+
+            track_meta = message_body["matcher.track.get"]["message"]["body"]["track"]
+
+            if track_meta.get("has_subtitles", 0):
+                genexp = iter_synced_lyrics(message_body)
+
             else:
-                if track_meta.get("has_instrumental", 0):
-                    genexp = iter_instrumental(message_body)
+                if track_meta.get("has_lyrics", 0):
+                    genexp = iter_unsynced_lyrics(message_body)
                 else:
-                    raise TrackNotFoundError(
-                        f"No lyrics found for {f'{title} by {artist}'!r}"
-                    )
+                    if track_meta.get("has_instrumental", 0):
+                        genexp = iter_instrumental(message_body)
+                    else:
+                        raise TrackNotFoundError(
+                            f"No lyrics found for {f'{title} by {artist}'!r}"
+                        )
 
         if lrc_format:
             yield from iter_parsed_to_lrc(genexp, track_meta)
@@ -236,10 +297,10 @@ class MusixMatch:
             yield from map(lambda track: track.get("text"), genexp)
 
 
-def parse_track(ctx: click.Context, argument: click.Argument, track):
+def parse_track(track):
 
     if track == "-":
-        return parse_track(ctx, argument, click.get_text_stream("stdin").read())
+        return parse_track(click.get_text_stream("stdin").read())
 
     match = ARTIST_TRACK_REGEX.match(track)
     if match is None:
@@ -249,20 +310,45 @@ def parse_track(ctx: click.Context, argument: click.Argument, track):
 
 
 @click.command()
-@click.argument("track", callback=parse_track)
+@click.argument("track")
 @click.option("--token", required=False, type=click.STRING, help="MusixMatch API token")
 @click.option("-l", "--lrc", is_flag=True, help="Output LRC instead of plain text")
-def musixmatch_lyrics(track, token, lrc):
+@click.option("-i", "--isrc", is_flag=True, help="Use ISRC instead of artist and track name")
+@click.option("-t", "--track-id", is_flag=True, help="Use track ID instead of artist and track name")
+@click.option("-s", "--spotify-id", is_flag=True, help="Use Spotify ID instead of artist and track name")
+def musixmatch_lyrics(track, token, lrc, isrc, track_id, spotify_id):
 
     session = requests.Session()
     session.headers.update({"User-Agent": HTTP_USER_AGENT})
+
+    kwargs = {}
+
+    if not any((isrc, track_id, spotify_id)):
+        artist, title = parse_track(track)
+        
+        kwargs.update(
+            artist=artist,
+            title=title,
+        )
+        
+    if (isrc & track_id) | (isrc & spotify_id) | (track_id & spotify_id):
+        raise click.ClickException("Cannot use any two of --isrc, --track-id, --spotify-id")
+
+    if isrc:
+        kwargs.update(isrc=track)
+    
+    if track_id:
+        kwargs.update(track_id=track)
+    
+    if spotify_id:
+        kwargs.update(spotify_id=track)
 
     if token is None:
         token = generate_token(session)
 
     client = MusixMatch(token, session=session)
 
-    for line in client.iter_lines(*track, lrc_format=lrc):
+    for line in client.iter_lines(**kwargs, lrc_format=lrc, is_isrc=isrc, is_track_id=track_id, is_spotify=spotify_id):
         print(line)
 
 
