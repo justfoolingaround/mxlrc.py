@@ -4,7 +4,7 @@ import hmac
 import pathlib
 import time
 from datetime import datetime, timedelta
-from urllib.parse import unquote, urlencode
+from urllib.parse import urlencode
 
 import click
 import orjson
@@ -14,13 +14,15 @@ from .constants import API_URL, MUSIC_SYMBOL
 from .exceptions import UnexpectedResponse, stderr_print
 
 SPOTIFY_TRACK_REGEX = regex.compile(
-    r"(?:\bspotify:track:|open\.spotify\.com/track/)(?P<id>[a-zA-Z0-9]+)"
+    r"(?:\bspotify:track:|open\.spotify\.com/track/)?(?P<id>[a-zA-Z0-9]{22})"
 )
 MUSIXMATCH_TRACK_REGEX = regex.compile(r"\b\d{8,10}\b")
 
 
-def get_api_signature(api_endpoint, timestamp, signature_protocol="sha1"):
+fake_decorator = lambda f: f
 
+
+def get_api_signature(api_endpoint, timestamp, signature_protocol="sha1"):
     signature = base64.urlsafe_b64encode(
         hmac.digest(
             b"IEJ5E8XFaHQvIQNfs7IC",
@@ -34,7 +36,6 @@ def get_api_signature(api_endpoint, timestamp, signature_protocol="sha1"):
 
 class TokenManager:
     def __init__(self, session, *, token_path=pathlib.Path("./.token")):
-
         self.token_path = token_path
         self.payload = {}
 
@@ -42,7 +43,6 @@ class TokenManager:
 
     @property
     def token(self):
-
         if self.is_valid():
             return self.payload["token"]
 
@@ -56,7 +56,6 @@ class TokenManager:
         return time.time() < payload.get("expires_at", 0)
 
     def load(self, *, signature_protocol="sha1"):
-
         is_valid = self.is_valid()
 
         if self.token_path is not None:
@@ -94,7 +93,6 @@ class TokenManager:
         )
 
     def save(self, payload=None):
-
         if payload is not None:
             self.payload = payload
 
@@ -114,13 +112,13 @@ def parse_duration(duration: float):
 
 
 def iter_synced_lyrics(message_body):
-
     center_count = 1
 
     for subtitle in orjson.loads(
         message_body.get("subtitle_list", ({},))[0]
         .get("subtitle", {})
-        .get("subtitle_body", "[]")
+        .get("subtitle_body")
+        or "[]"
     ):
         subtitle_time = subtitle["time"]
         subtitle_text = subtitle["text"]
@@ -135,14 +133,15 @@ def iter_synced_lyrics(message_body):
 
 
 def iter_unsynced_lyrics(message_body):
+    if not message_body:
+        return
 
     for lyrics in (
-        message_body.get("body", {})
+        (message_body.get("body", {}))
         .get("lyrics", {})
         .get("lyrics_body", "")
         .split("\n")
     ):
-
         yield {
             "time": "00:00.00",
             "text": lyrics,
@@ -174,7 +173,6 @@ def iter_parsed_to_lrc(parsed_lyrics, track_meta):
 
 
 class UserInputEnum(enum.Enum):
-
     ISRC = "isrc"
     SPOTIFY_TRACK_ID = "spotify_track_id"
     MUSIXMATCH_TRACK_ID = "musixmatch_track_id"
@@ -183,7 +181,6 @@ class UserInputEnum(enum.Enum):
 
 
 def parse_track(track: str):
-
     if track == "-":
         return parse_track(click.get_text_stream("stdin").read())
 
