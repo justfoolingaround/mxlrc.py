@@ -20,7 +20,6 @@ HTTP_USER_AGENT = "mxlrc.py (justfoolingarounddev)"
 @click.option("-l", "--lrc", is_flag=True, help="Output LRC instead of plain text")
 @click.pass_context
 def musixmatch_lyrics(ctx: click.Context, track: str, token: str, lrc: bool):
-
     session = requests.Session()
     session.headers.update({"User-Agent": HTTP_USER_AGENT})
 
@@ -35,8 +34,9 @@ def musixmatch_lyrics(ctx: click.Context, track: str, token: str, lrc: bool):
         case UserInputEnum.ISRC:
             message = lyrics_api_client.get_track_from_isrc(args)
             track_meta = lyrics_api_client.get_api(
-                "track.get",
+                "matcher.track.get",
                 {
+                    "q_track": "*",
                     "track_isrc": args,
                 },
             )["track"]
@@ -44,16 +44,18 @@ def musixmatch_lyrics(ctx: click.Context, track: str, token: str, lrc: bool):
         case UserInputEnum.MUSIXMATCH_TRACK_ID:
             message = lyrics_api_client.get_track_from_id(args)
             track_meta = lyrics_api_client.get_api(
-                "track.get",
+                "matcher.track.get",
                 {
+                    "q_track": "*",
                     "track_id": args,
                 },
             )["track"]
         case UserInputEnum.SPOTIFY_TRACK_ID:
             message = lyrics_api_client.get_track_from_spotify_id(args)
             track_meta = lyrics_api_client.get_api(
-                "track.get",
+                "matcher.track.get",
                 {
+                    "q_track": "*",
                     "track_spotify_id": args,
                 },
             )["track"]
