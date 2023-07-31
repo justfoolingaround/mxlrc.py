@@ -32,33 +32,14 @@ def musixmatch_lyrics(ctx: click.Context, track: str, token: str, lrc: bool):
 
     match type_of:
         case UserInputEnum.ISRC:
-            message = lyrics_api_client.get_track_from_isrc(args)
-            track_meta = lyrics_api_client.get_api(
-                "matcher.track.get",
-                {
-                    "q_track": "*",
-                    "track_isrc": args,
-                },
-            )["track"]
+            response = lyrics_api_client.get_track_from_isrc(args)
 
         case UserInputEnum.MUSIXMATCH_TRACK_ID:
-            message = lyrics_api_client.get_track_from_id(args)
-            track_meta = lyrics_api_client.get_api(
-                "matcher.track.get",
-                {
-                    "q_track": "*",
-                    "track_id": args,
-                },
-            )["track"]
+            response = lyrics_api_client.get_track_from_id(args)
+
         case UserInputEnum.SPOTIFY_TRACK_ID:
-            message = lyrics_api_client.get_track_from_spotify_id(args)
-            track_meta = lyrics_api_client.get_api(
-                "matcher.track.get",
-                {
-                    "q_track": "*",
-                    "track_spotify_id": args,
-                },
-            )["track"]
+            response = lyrics_api_client.get_track_from_spotify_id(args)
+
         case UserInputEnum.UNKNOWN:
             stderr_print(
                 "mxlrc.py is operating under search results, please duely note that MusixMatch's are extremely inaccurate. "
@@ -69,8 +50,14 @@ def musixmatch_lyrics(ctx: click.Context, track: str, token: str, lrc: bool):
             if not search_results:
                 raise TrackNotFoundError(f"No lyrics found for {track!r}.")
 
-            track_meta = search_results[0]["track"]
-            message = lyrics_api_client.get_track_from_id(track_meta["track_id"])
+            response = lyrics_api_client.get_track_from_id(
+                search_results[0]["track"]["track_id"]
+            )
+
+    message = response["macro_calls"]["track.subtitles.get"]["message"].get("body", {})
+    track_meta = (
+        response["macro_calls"]["matcher.track.get"]["message"].get("body", {}) or {}
+    ).get("track", {})
 
     if track_meta.get("has_subtitles", 0):
         genexp = iter_synced_lyrics(message)

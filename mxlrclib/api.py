@@ -5,11 +5,9 @@ from .exceptions import UnexpectedResponse
 
 
 class MusixMatch:
-
     lyrics_endpoint = API_URL + "macro.subtitles.get"
 
     def __init__(self, token, *, session: requests.Session = None):
-
         self.token = token
         self.session = session or requests.Session()
 
@@ -30,7 +28,6 @@ class MusixMatch:
         return response["body"]
 
     def search_track(self, query):
-
         return self.get_api(
             "track.search",
             {
@@ -40,27 +37,27 @@ class MusixMatch:
 
     def get_track_from_isrc(self, isrc):
         return self.get_api(
-            "track.subtitles.get",
+            "macro.subtitles.get",
             {
                 "track_isrc": isrc,
+                "q_track": "*",
             },
-            raise_on_faulty=False,
         )
 
     def get_track_from_id(self, track_id):
         return self.get_api(
-            "track.subtitles.get",
+            "macro.subtitles.get",
             {
                 "track_id": track_id,
+                "q_track": "*",
             },
-            raise_on_faulty=False,
         )
 
     def get_track_from_spotify_id(self, spotify_id):
         return self.get_api(
-            "track.subtitles.get",
+            "macro.subtitles.get",
             {
                 "track_spotify_id": spotify_id,
+                "q_track": "*",
             },
-            raise_on_faulty=False,
         )
